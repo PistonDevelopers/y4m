@@ -25,6 +25,8 @@ pub enum Error {
     BadInput,
     /// Unknown colorspace (possibly just unimplemented).
     UnknownColorspace,
+    /// Unknown interlacing value
+    UnknownInterlaceValue,
     /// Error while parsing the file/frame header.
     // TODO(Kagami): Better granularity of parse errors.
     ParseError(ParseError),
@@ -43,6 +45,7 @@ impl std::error::Error for crate::Error {
             Error::ParseError(ref err) => Some(err),
             Error::IoError(ref err) => Some(err),
             Error::OutOfMemory => None,
+            Error::UnknownInterlaceValue => None
         }
     }
 }
@@ -56,6 +59,7 @@ impl fmt::Display for crate::Error {
             Error::ParseError(ref err) => err.fmt(f),
             Error::IoError(ref err) => err.fmt(f),
             Error::OutOfMemory => write!(f, "Out of memory (limits exceeded)"),
+            Error::UnknownInterlaceValue => write!(f, "Invalid value for interlacing parameter"),
         }
     }
 }
@@ -194,6 +198,19 @@ impl fmt::Display for Ratio {
     }
 }
 
+// Interlacing
+#[derive(Debug, Clone, Copy)]
+/// Interleaving/Interlacing parameter as defined by https://wiki.multimedia.cx/index.php/YUV4MPEG2
+pub enum Interlacing {
+    /// "Ip" - Progressive
+    Progressive,
+    /// "It" - Top field first
+    TopFieldFirst,
+    /// "Ib" - Bottom field first
+    BottomFieldFirst,
+    /// "Im" - Mixed mode
+    MixedMode,
+}
 /// Colorspace (color model/pixel format). Only subset of them is supported.
 ///
 /// From libavformat/yuv4mpegenc.c:
@@ -313,6 +330,8 @@ pub struct Decoder<R: Read> {
     colorspace: Colorspace,
     y_len: usize,
     u_len: usize,
+    interlacing: Interlacing,
+    comments: Vec<String>,
 }
 
 impl<R: Read> Decoder<R> {
@@ -336,6 +355,8 @@ impl<R: Read> Decoder<R> {
         let mut framerate = Ratio::new(25, 1);
         let mut pixel_aspect = Ratio::new(1, 1);
         let mut colorspace = None;
+        let mut comments = Vec::<String>::new();
+        let mut interlacing = None;
         // We shouldn't convert it to string because encoding is unspecified.
         for param in raw_params.split(|&b| b == FIELD_SEP) {
             if param.is_empty() {
@@ -345,6 +366,17 @@ impl<R: Read> Decoder<R> {
             // TODO(Kagami): interlacing, comment.
             match name {
                 b'W' => width = parse_bytes(value)?,
+                b'X' => comments.push(String::from_utf8_lossy(value).into_owned()),
+                b'I' => {
+                    interlacing = match value {
+                        b"p" => Some(Interlacing::Progressive),
+                        b"t" => Some(Interlacing::TopFieldFirst),
+                        b"b" => Some(Interlacing::BottomFieldFirst),
+                        b"m" => Some(Interlacing::MixedMode),
+                        _ => return Err(Error::UnknownInterlaceValue),
+
+                    }
+                }
                 b'H' => height = parse_bytes(value)?,
                 b'F' => framerate = Ratio::parse(value)?,
                 b'A' => pixel_aspect = Ratio::parse(value)?,
@@ -370,6 +402,7 @@ impl<R: Read> Decoder<R> {
             }
         }
         let colorspace = colorspace.unwrap_or(Colorspace::C420);
+        let interlacing = interlacing.unwrap_or(Interlacing::Progressive);
         if width == 0 || height == 0 {
             parse_error!(ParseError::General)
         }
@@ -391,6 +424,8 @@ impl<R: Read> Decoder<R> {
             colorspace,
             y_len,
             u_len,
+            interlacing,
+            comments,
         })
     }
 
